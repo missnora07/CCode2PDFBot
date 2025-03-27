@@ -229,15 +229,12 @@ async def error_handler(update: Update, context: CallbackContext) -> None:
     if context.user_data:
         context.user_data.clear()
 
-def main() -> None:
+async def main() -> None:
     application = Application.builder().token(TOKEN).build()
     
-    # Clear any existing webhook to ensure polling works
-    async def clear_webhook():
-        await application.bot.set_webhook(url=None)  # Drop any webhook
-        logger.info("Webhook cleared to ensure clean polling start")
-    
-    asyncio.run(clear_webhook())  # Run synchronously at startup
+    # Clear webhook to ensure clean polling
+    await application.bot.set_webhook(url=None)
+    logger.info("Webhook cleared to ensure clean polling start")
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -266,7 +263,7 @@ def main() -> None:
     
     application.post_shutdown = shutdown
     
-    application.run_polling()
+    await application.run_polling()
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
