@@ -72,8 +72,9 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting program execution")
+            # Use -u flag to force unbuffered output
             process = await asyncio.create_subprocess_exec(
-                "./temp",
+                "./temp", "-u",
                 stdin=PIPE,
                 stdout=PIPE,
                 stderr=PIPE,
@@ -81,6 +82,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
             )
             
             context.user_data['process'] = process
+            logger.info(f"Process started with PID: {process.pid}")
             asyncio.create_task(read_process_output(update, context))
             
             await update.message.reply_text(
@@ -106,9 +108,9 @@ async def read_process_output(update: Update, context: CallbackContext):
     output = context.user_data['output']
     errors = context.user_data['errors']
     
+    logger.info("Starting to read process output")
     while process.returncode is None:
         try:
-            # Read one line from stdout or stderr
             stdout_task = asyncio.create_task(process.stdout.readline())
             stderr_task = asyncio.create_task(process.stderr.readline())
             done, pending = await asyncio.wait(
@@ -119,18 +121,20 @@ async def read_process_output(update: Update, context: CallbackContext):
             
             if stdout_task in done:
                 stdout_line = (await stdout_task).decode().strip()
+                logger.info(f"Read stdout: '{stdout_line}'")
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
-                    # Pause for input if this looks like a prompt
                     if stdout_line and (stdout_line.endswith(": ") or "enter" in stdout_line.lower()):
                         context.user_data['waiting_for_input'] = True
+                        logger.info("Detected input prompt, pausing for user input")
                         for task in pending:
                             task.cancel()
-                        return  # Wait for user input
+                        return
             
             if stderr_task in done:
                 stderr_line = (await stderr_task).decode().strip()
+                logger.info(f"Read stderr: '{stderr_line}'")
                 if stderr_line:
                     errors.append(stderr_line)
                     await update.message.reply_text(f"Error: {stderr_line}")
@@ -142,23 +146,25 @@ async def read_process_output(update: Update, context: CallbackContext):
                 except asyncio.CancelledError:
                     pass
             
-            # If no output and process ended, exit
-            if not done and process.returncode is not None:
-                logger.info("Process ended with no further output")
-                break
-            elif not done:
-                logger.info("No output yet, process likely waiting for input or processing")
+            if not done:
+                await process.wait(timeout=1.0)  # Brief wait to check status
+                if process.returncode is not None:
+                    logger.info("Process ended unexpectedly")
+                    break
+                logger.info("No output yet, assuming process is waiting for input")
                 context.user_data['waiting_for_input'] = True
-                return  # Pause and wait for input
+                return
         
         except Exception as e:
             logger.error(f"Error in read_process_output: {str(e)}")
             await update.message.reply_text(f"Execution error: {str(e)}")
             break
     
-    # Process has ended, read remaining output and finalize
+    # Process has ended
     remaining_stdout = (await process.stdout.read()).decode().strip()
     remaining_stderr = (await process.stderr.read()).decode().strip()
+    logger.info(f"Remaining stdout: '{remaining_stdout}'")
+    logger.info(f"Remaining stderr: '{remaining_stderr}'")
     if remaining_stdout:
         output.append(remaining_stdout)
         await update.message.reply_text(remaining_stdout)
@@ -185,7 +191,7 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
         await process.stdin.drain()
         logger.info(f"Sent input to process: {user_input}")
         context.user_data['waiting_for_input'] = False
-        asyncio.create_task(read_process_output(update, context))  # Resume reading after input
+        asyncio.create_task(read_process_output(update, context))
     except Exception as e:
         logger.error(f"Error sending input to process: {str(e)}")
         await update.message.reply_text(f"Failed to send input: {str(e)}")
