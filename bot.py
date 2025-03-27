@@ -5,7 +5,7 @@ import subprocess
 import os
 
 # Telegram Bot Token
-TOKEN = 'YOUR_BOT_TOKEN_HERE'
+TOKEN = '7667215138:AAHFriagQ3gvuMwbeV0NPedehtw7Ag859Dw'
 
 # States for ConversationHandler
 CODE, INPUT = range(2)
