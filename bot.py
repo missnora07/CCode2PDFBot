@@ -11,6 +11,7 @@ import pdfkit
 import subprocess
 import os
 import logging
+import re
 
 # Set up logging
 logging.basicConfig(
@@ -31,7 +32,7 @@ CODE, INPUT = range(2)
 
 async def start(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(
-        'Hi! Send me your C code to compile. If your program needs input, I’ll ask for it after receiving the code.'
+        'Hi! Send me your C code to compile (single-line or multi-line). If your program needs input, I’ll ask for it.'
     )
     return CODE
 
@@ -40,11 +41,24 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
     context.user_data['code'] = code
     
     try:
-        logger.info("Received code:\n%s", code)
+        logger.info("Raw received code:\n%s", code)
         
-        # Write the code as-is (assuming multi-line input is properly formatted)
+        # Normalize code: handle single-line or collapsed multi-line input
+        formatted_code = code
+        if '\n' not in code:  # Single-line input
+            # Split #include directives and major C syntax elements
+            formatted_code = re.sub(r'(#include\s*<\w+\.h>)', r'\1\n', code)  # #include on its own line
+            formatted_code = re.sub(r'(\bint\s+main\(\)\s*\{)', r'\n\1', formatted_code)  # main() on new line
+            formatted_code = re.sub(r'(\{|\})', r'\1\n', formatted_code)  # Braces on new lines
+            formatted_code = re.sub(r'(;\s*)', r';\n', formatted_code)  # Semicolons followed by newlines
+            # Clean up extra newlines and whitespace
+            formatted_code = '\n'.join(line.strip() for line in formatted_code.splitlines() if line.strip())
+        
+        logger.info("Formatted code:\n%s", formatted_code)
+        
+        # Write the code to temp.c
         with open("temp.c", "w") as file:
-            file.write(code)
+            file.write(formatted_code)
         
         logger.info("Wrote code to temp.c")
         
