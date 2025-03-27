@@ -30,7 +30,7 @@ if not TOKEN:
     raise ValueError("No TOKEN provided in environment variables!")
 
 # States for ConversationHandler
-CODE, RUNNING = range(2)  # Removed unused INPUT state
+CODE, RUNNING = range(2)
 
 async def start(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(
@@ -44,13 +44,13 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
     context.user_data['code'] = code
     context.user_data['output'] = []
     context.user_data['errors'] = []
+    context.user_data['waiting_for_input'] = False
     
     try:
         logger.info("Raw received code:\n%s", code)
         
-        # Normalize code: handle single-line or collapsed multi-line input
         formatted_code = code
-        if '\n' not in code:  # Single-line input
+        if '\n' not in code:
             formatted_code = re.sub(r'(#include\s*<\w+\.h>)\s*', r'\1\n', code)
             formatted_code = re.sub(r'(int\s+main\(\)\s*\{)', r'\n\1', formatted_code)
             formatted_code = re.sub(r'(\{|\})', r'\1\n', formatted_code)
@@ -72,8 +72,6 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting program execution")
-            
-            # Start the process with asyncio pipes for interactive communication
             process = await asyncio.create_subprocess_exec(
                 "./temp",
                 stdin=PIPE,
@@ -82,8 +80,6 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
             )
             
             context.user_data['process'] = process
-            
-            # Start reading output in the background
             asyncio.create_task(read_process_output(update, context))
             
             await update.message.reply_text(
@@ -105,14 +101,12 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
 async def read_process_output(update: Update, context: CallbackContext):
-    """Continuously read output from the process and send to user"""
     process = context.user_data['process']
     output = context.user_data['output']
     errors = context.user_data['errors']
     
-    while True:
+    while process.returncode is None:
         try:
-            # Read stdout and stderr concurrently with a timeout
             stdout_task = asyncio.create_task(process.stdout.readline())
             stderr_task = asyncio.create_task(process.stderr.readline())
             done, pending = await asyncio.wait(
@@ -121,21 +115,23 @@ async def read_process_output(update: Update, context: CallbackContext):
                 return_when=asyncio.FIRST_COMPLETED
             )
             
-            # Handle stdout
             if stdout_task in done:
                 stdout_line = (await stdout_task).decode().strip()
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
+                    if stdout_line.endswith(": "):  # Detect input prompt
+                        context.user_data['waiting_for_input'] = True
+                        for task in pending:
+                            task.cancel()
+                        return  # Wait for user input
             
-            # Handle stderr
             if stderr_task in done:
                 stderr_line = (await stderr_task).decode().strip()
                 if stderr_line:
                     errors.append(stderr_line)
                     await update.message.reply_text(f"Error: {stderr_line}")
             
-            # Cancel pending tasks
             for task in pending:
                 task.cancel()
                 try:
@@ -143,36 +139,30 @@ async def read_process_output(update: Update, context: CallbackContext):
                 except asyncio.CancelledError:
                     pass
             
-            # Check if process has ended
-            if process.returncode is not None:
-                # Read any remaining output
-                remaining_stdout = (await process.stdout.read()).decode().strip()
-                remaining_stderr = (await process.stderr.read()).decode().strip()
-                if remaining_stdout:
-                    output.append(remaining_stdout)
-                    await update.message.reply_text(remaining_stdout)
-                if remaining_stderr:
-                    errors.append(remaining_stderr)
-                    await update.message.reply_text(f"Error: {remaining_stderr}")
-                
-                # Generate and send PDF
-                await generate_and_send_pdf(update, context)
-                break
-            
-            # If no output within timeout, check process status
-            if not done:
+            if not done and not context.user_data['waiting_for_input']:
                 logger.warning("No output within 5 seconds, checking process status")
+                await process.wait()  # Force check if process has ended silently
                 if process.returncode is not None:
-                    await generate_and_send_pdf(update, context)
                     break
         
         except Exception as e:
             logger.error(f"Error in read_process_output: {str(e)}")
             await update.message.reply_text(f"Execution error: {str(e)}")
             break
+    
+    # Process has ended, read remaining output and finalize
+    remaining_stdout = (await process.stdout.read()).decode().strip()
+    remaining_stderr = (await process.stderr.read()).decode().strip()
+    if remaining_stdout:
+        output.append(remaining_stdout)
+        await update.message.reply_text(remaining_stdout)
+    if remaining_stderr:
+        errors.append(remaining_stderr)
+        await update.message.reply_text(f"Error: {remaining_stderr}")
+    
+    await generate_and_send_pdf(update, context)
 
 async def handle_running(update: Update, context: CallbackContext) -> int:
-    """Handle user input during program execution"""
     user_input = update.message.text
     process = context.user_data.get('process')
     
@@ -180,12 +170,16 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text("Program is not running anymore.")
         return ConversationHandler.END
     
+    if not context.user_data.get('waiting_for_input', False):
+        await update.message.reply_text("Program isn’t waiting for input right now.")
+        return RUNNING
+    
     try:
-        # Send input to the running process
         process.stdin.write((user_input + "\n").encode())
         await process.stdin.drain()
         logger.info(f"Sent input to process: {user_input}")
-        
+        context.user_data['waiting_for_input'] = False
+        asyncio.create_task(read_process_output(update, context))  # Resume reading
     except Exception as e:
         logger.error(f"Error sending input to process: {str(e)}")
         await update.message.reply_text(f"Failed to send input: {str(e)}")
@@ -193,7 +187,6 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
     return RUNNING
 
 async def generate_and_send_pdf(update: Update, context: CallbackContext):
-    """Generate PDF with results and send to user"""
     try:
         code = context.user_data['code']
         output = "\n".join(context.user_data['output'])
@@ -234,7 +227,6 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         await cleanup(context)
 
 async def cleanup(context: CallbackContext):
-    """Clean up resources asynchronously"""
     process = context.user_data.get('process')
     if process and process.returncode is None:
         process.terminate()
@@ -256,13 +248,11 @@ async def cleanup(context: CallbackContext):
     context.user_data.clear()
 
 async def cancel(update: Update, context: CallbackContext) -> int:
-    """Cancel the current operation"""
     await update.message.reply_text("Operation cancelled.")
     await cleanup(context)
     return ConversationHandler.END
 
 async def error_handler(update: Update, context: CallbackContext) -> None:
-    """Handle errors"""
     logger.error("Exception occurred:", exc_info=context.error)
     try:
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
@@ -273,7 +263,6 @@ async def error_handler(update: Update, context: CallbackContext) -> None:
 def main() -> None:
     application = Application.builder().token(TOKEN).build()
     
-    # Clear webhook synchronously before polling starts
     loop = asyncio.get_event_loop()
     loop.run_until_complete(application.bot.set_webhook(url=None))
     logger.info("Webhook cleared to ensure clean polling start")
@@ -290,7 +279,6 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_error_handler(error_handler)
     
-    # Run polling synchronously, letting it manage the event loop
     application.run_polling()
 
 if __name__ == '__main__':
