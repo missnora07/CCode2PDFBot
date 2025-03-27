@@ -30,7 +30,7 @@ if not TOKEN:
     raise ValueError("No TOKEN provided in environment variables!")
 
 # States for ConversationHandler
-CODE, RUNNING, INPUT = range(3)
+CODE, RUNNING = range(2)
 
 async def start(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(
@@ -73,8 +73,9 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
             # Start the program interactively
             process = await asyncio.create_subprocess_exec("./temp", stdin=PIPE, stdout=PIPE, stderr=PIPE)
             context.user_data['process'] = process
-            # Start reading output in the background
-            asyncio.create_task(read_output(update, context))
+            context.user_data['waiting_for_input'] = False
+            # Run the interactive loop
+            await run_interactive(update, context)
             return RUNNING
         else:
             error_msg = f"Compilation Error:\nSTDERR:\n{compile_result.stderr}"
@@ -88,16 +89,15 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(f"An error occurred: {str(e)}")
         return ConversationHandler.END
 
-async def read_output(update: Update, context: CallbackContext):
-    """Read program output line-by-line and prompt for input."""
+async def run_interactive(update: Update, context: CallbackContext):
+    """Run the program interactively, reading output and prompting for input."""
     process = context.user_data['process']
     output = context.user_data['output']
     
-    while True:
+    while process.returncode is None:
         try:
-            line = await process.stdout.readline()
-            if not line:  # EOF
-                break
+            # Read stdout with a timeout to avoid hanging
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
             line = line.decode().strip()
             if line:
                 logger.info(f"Program output: {line}")
@@ -106,18 +106,26 @@ async def read_output(update: Update, context: CallbackContext):
                 # Check if this is a prompt requiring input
                 if line.endswith(": "):  # Heuristic for input prompts
                     context.user_data['waiting_for_input'] = True
-                    return  # Wait for user input in INPUT state
+                    return  # Wait for user input
+        except asyncio.TimeoutError:
+            logger.warning("No output received within 5 seconds, checking if program is done")
+            await process.wait()
+            break
         except Exception as e:
             logger.error(f"Error reading output: {str(e)}")
             break
     
-    # Program finished
+    # Program finished or errored
     await finish_program(update, context)
 
 async def handle_input(update: Update, context: CallbackContext) -> int:
     if 'process' not in context.user_data or context.user_data['process'].returncode is not None:
         await update.message.reply_text("Program has finished or failed.")
         return ConversationHandler.END
+    
+    if not context.user_data.get('waiting_for_input', False):
+        await update.message.reply_text("Not expecting input right now. Waiting for program output.")
+        return RUNNING
     
     user_input = update.message.text
     context.user_data['inputs'].append(user_input)
@@ -129,8 +137,8 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         process.stdin.write(f"{user_input}\n".encode())
         await process.stdin.drain()
         context.user_data['waiting_for_input'] = False
-        # Continue reading output
-        asyncio.create_task(read_output(update, context))
+        # Continue the interactive loop
+        await run_interactive(update, context)
         return RUNNING
     except Exception as e:
         logger.error(f"Error sending input: {str(e)}")
@@ -230,7 +238,6 @@ def main() -> None:
         states={
             CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code)],
             RUNNING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input)],
-            INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
