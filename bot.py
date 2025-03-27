@@ -41,15 +41,14 @@ async def start(update: Update, context: CallbackContext) -> int:
 async def handle_code(update: Update, context: CallbackContext) -> int:
     code = update.message.text
     context.user_data['code'] = code
-    context.user_data['output'] = []  # Store all output for PDF
-    context.user_data['inputs'] = []  # Store user inputs
+    context.user_data['output'] = []
+    context.user_data['inputs'] = []
     
     try:
         logger.info("Raw received code:\n%s", code)
         
-        # Normalize code: handle single-line or collapsed multi-line input
         formatted_code = code
-        if '\n' not in code:  # Single-line input
+        if '\n' not in code:
             formatted_code = re.sub(r'(#include\s*<\w+\.h>)\s*', r'\1\n', code)
             formatted_code = re.sub(r'(int\s+main\(\)\s*\{)', r'\n\1', formatted_code)
             formatted_code = re.sub(r'(\{|\})', r'\1\n', formatted_code)
@@ -70,11 +69,9 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting interactive run")
-            # Start the program interactively
             process = await asyncio.create_subprocess_exec("./temp", stdin=PIPE, stdout=PIPE, stderr=PIPE)
             context.user_data['process'] = process
             context.user_data['waiting_for_input'] = False
-            # Run the interactive loop
             await run_interactive(update, context)
             return RUNNING
         else:
@@ -90,23 +87,20 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
 async def run_interactive(update: Update, context: CallbackContext):
-    """Run the program interactively, reading output and prompting for input."""
     process = context.user_data['process']
     output = context.user_data['output']
     
     while process.returncode is None:
         try:
-            # Read stdout with a timeout to avoid hanging
             line = await asyncio.wait_for(process.stdout.readline(), timeout=5.0)
             line = line.decode().strip()
             if line:
                 logger.info(f"Program output: {line}")
                 output.append(line)
                 await update.message.reply_text(line)
-                # Check if this is a prompt requiring input
-                if line.endswith(": "):  # Heuristic for input prompts
+                if line.endswith(": "):
                     context.user_data['waiting_for_input'] = True
-                    return  # Wait for user input
+                    return
         except asyncio.TimeoutError:
             logger.warning("No output received within 5 seconds, checking if program is done")
             await process.wait()
@@ -115,7 +109,6 @@ async def run_interactive(update: Update, context: CallbackContext):
             logger.error(f"Error reading output: {str(e)}")
             break
     
-    # Program finished or errored
     await finish_program(update, context)
 
 async def handle_input(update: Update, context: CallbackContext) -> int:
@@ -133,11 +126,9 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
     
     process = context.user_data['process']
     try:
-        # Send input to the program
         process.stdin.write(f"{user_input}\n".encode())
         await process.stdin.drain()
         context.user_data['waiting_for_input'] = False
-        # Continue the interactive loop
         await run_interactive(update, context)
         return RUNNING
     except Exception as e:
@@ -146,7 +137,6 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
 async def finish_program(update: Update, context: CallbackContext):
-    """Finish the program and generate PDF."""
     process = context.user_data['process']
     code = context.user_data['code']
     output = context.user_data['output']
@@ -162,7 +152,6 @@ async def finish_program(update: Update, context: CallbackContext):
     if process.returncode != 0 and stderr:
         await update.message.reply_text(f"Runtime Error:\nSTDERR:\n{stderr}")
     else:
-        # Combine output and inputs for PDF
         full_output = ""
         input_idx = 0
         for line in output:
@@ -198,7 +187,6 @@ async def finish_program(update: Update, context: CallbackContext):
         
         await update.message.reply_text("Here’s your PDF with the code and output!")
 
-    # Clean up
     for file in ["temp.c", "temp", "output.pdf"]:
         if os.path.exists(file):
             try:
@@ -212,12 +200,16 @@ async def finish_program(update: Update, context: CallbackContext):
 
 async def cancel(update: Update, context: CallbackContext) -> int:
     if 'process' in context.user_data and context.user_data['process'].returncode is None:
-        context.user_data['process'].terminate()
+        process = context.user_data['process']
+        process.terminate()
+        await process.wait()  # Ensure process is fully terminated
+        logger.info("Process terminated via cancel")
     await update.message.reply_text("Operation cancelled.")
     for file in ["temp.c", "temp", "output.pdf"]:
         if os.path.exists(file):
             try:
                 os.remove(file)
+                logger.info(f"Cleaned up file: {file}")
             except OSError as e:
                 logger.error(f"Failed to remove {file}: {str(e)}")
     context.user_data.clear()
@@ -225,10 +217,16 @@ async def cancel(update: Update, context: CallbackContext) -> int:
 
 async def error_handler(update: Update, context: CallbackContext) -> None:
     logger.error("Exception occurred:", exc_info=context.error)
+    if 'process' in context.user_data and context.user_data['process'].returncode is None:
+        process = context.user_data['process']
+        process.terminate()
+        await process.wait()
+        logger.info("Process terminated due to error")
     try:
-        await update.message.reply_text("An unexpected error occurred. Please try again later.")
+        await update.message.reply_text("An unexpected error occurred. Please try again.")
     except Exception:
         pass
+    context.user_data.clear()
 
 def main() -> None:
     application = Application.builder().token(TOKEN).build()
@@ -244,7 +242,24 @@ def main() -> None:
     
     application.add_handler(conv_handler)
     application.add_error_handler(error_handler)
-
+    
+    # Ensure clean shutdown on application stop
+    async def shutdown():
+        if 'process' in application.bot_data and application.bot_data['process'].returncode is None:
+            application.bot_data['process'].terminate()
+            await application.bot_data['process'].wait()
+            logger.info("Shutdown: Process terminated")
+        for file in ["temp.c", "temp", "output.pdf"]:
+            if os.path.exists(file):
+                try:
+                    os.remove(file)
+                    logger.info(f"Shutdown: Cleaned up file: {file}")
+                except OSError as e:
+                    logger.error(f"Shutdown: Failed to remove {file}: {str(e)}")
+    
+    application.add_handler(CommandHandler("stop", lambda update, context: application.stop_running()))
+    application.post_shutdown = shutdown
+    
     application.run_polling()
 
 if __name__ == '__main__':
