@@ -76,7 +76,8 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
                 "./temp",
                 stdin=PIPE,
                 stdout=PIPE,
-                stderr=PIPE
+                stderr=PIPE,
+                env={"PYTHONUNBUFFERED": "1"}  # Ensure unbuffered output
             )
             
             context.user_data['process'] = process
@@ -111,7 +112,7 @@ async def read_process_output(update: Update, context: CallbackContext):
             stderr_task = asyncio.create_task(process.stderr.readline())
             done, pending = await asyncio.wait(
                 [stdout_task, stderr_task],
-                timeout=5.0,
+                timeout=10.0,  # Increased timeout to give program time to wait for input
                 return_when=asyncio.FIRST_COMPLETED
             )
             
@@ -120,11 +121,12 @@ async def read_process_output(update: Update, context: CallbackContext):
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
-                    if stdout_line.endswith(": "):  # Detect input prompt
+                    # Detect if this is an input prompt (e.g., ends with colon or space)
+                    if stdout_line and not stdout_line.endswith('\n') or stdout_line.endswith(": "):
                         context.user_data['waiting_for_input'] = True
                         for task in pending:
                             task.cancel()
-                        return  # Wait for user input
+                        return  # Pause and wait for input
             
             if stderr_task in done:
                 stderr_line = (await stderr_task).decode().strip()
@@ -139,11 +141,14 @@ async def read_process_output(update: Update, context: CallbackContext):
                 except asyncio.CancelledError:
                     pass
             
-            if not done and not context.user_data['waiting_for_input']:
-                logger.warning("No output within 5 seconds, checking process status")
-                await process.wait()  # Force check if process has ended silently
-                if process.returncode is not None:
-                    break
+            # Only warn if process has ended unexpectedly
+            if not done and process.returncode is not None:
+                logger.warning("No output received and process ended unexpectedly")
+                break
+            elif not done:
+                logger.info("Process is alive, likely waiting for input")
+                context.user_data['waiting_for_input'] = True
+                return  # Wait for input without timing out
         
         except Exception as e:
             logger.error(f"Error in read_process_output: {str(e)}")
