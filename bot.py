@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 # Telegram Bot Token
 TOKEN = os.getenv('TOKEN')
 
-# Debug: Print the token
 print(f"Loaded TOKEN: {TOKEN}")
 if not TOKEN:
     raise ValueError("No TOKEN provided in environment variables!")
@@ -41,26 +40,20 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
     context.user_data['code'] = code
     
     try:
-        # Preprocess the code to ensure proper formatting
-        formatted_code = ""
-        if code.startswith("#include"):
-            include_end = code.find(">") + 1
-            formatted_code += code[:include_end] + "\n"
-            remaining_code = code[include_end:].strip()
-            lines = [line.strip() + ";\n" for line in remaining_code.split(";") if line.strip()]
-            formatted_code += "".join(lines)
-        else:
-            lines = [line.strip() + ";\n" for line in code.split(";") if line.strip()]
-            formatted_code = "".join(lines)
+        logger.info("Received code:\n%s", code)
         
-        logger.info("Formatted code:\n%s", formatted_code)
-        
-        # Write formatted C code to a file
+        # Write the code as-is (assuming multi-line input is properly formatted)
         with open("temp.c", "w") as file:
-            file.write(formatted_code)
+            file.write(code)
+        
+        logger.info("Wrote code to temp.c")
         
         # Compile C code
         compile_result = subprocess.run(["gcc", "temp.c", "-o", "temp"], capture_output=True, text=True)
+        
+        logger.info(f"Compilation result - return code: {compile_result.returncode}")
+        logger.info(f"Compilation stdout: {compile_result.stdout}")
+        logger.info(f"Compilation stderr: {compile_result.stderr}")
         
         if compile_result.returncode == 0:
             await update.message.reply_text(
@@ -96,7 +89,6 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
             await update.message.reply_text(f"Runtime Error:\n{run_result.stderr}")
             return ConversationHandler.END
         
-        # Prepare HTML content
         html_content = f"""
         <html>
         <body>
@@ -116,11 +108,9 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         pdfkit.from_string(html_content, 'output.pdf')
         logger.info("PDF generated successfully")
         
-        # Verify file exists
         if not os.path.exists('output.pdf'):
             raise FileNotFoundError("PDF file was not created")
         
-        # Send PDF
         with open('output.pdf', 'rb') as pdf_file:
             logger.info("Sending PDF to user...")
             await context.bot.send_document(chat_id=update.effective_chat.id, document=pdf_file)
