@@ -199,10 +199,10 @@ async def finish_program(update: Update, context: CallbackContext):
     return ConversationHandler.END
 
 async def cancel(update: Update, context: CallbackContext) -> int:
-    if 'process' in context.user_data and context.user_data['process'].returncode is None:
+    if context.user_data.get('process') and context.user_data['process'].returncode is None:
         process = context.user_data['process']
         process.terminate()
-        await process.wait()  # Ensure process is fully terminated
+        await process.wait()
         logger.info("Process terminated via cancel")
     await update.message.reply_text("Operation cancelled.")
     for file in ["temp.c", "temp", "output.pdf"]:
@@ -217,7 +217,7 @@ async def cancel(update: Update, context: CallbackContext) -> int:
 
 async def error_handler(update: Update, context: CallbackContext) -> None:
     logger.error("Exception occurred:", exc_info=context.error)
-    if 'process' in context.user_data and context.user_data['process'].returncode is None:
+    if context.user_data and 'process' in context.user_data and context.user_data['process'].returncode is None:
         process = context.user_data['process']
         process.terminate()
         await process.wait()
@@ -226,10 +226,18 @@ async def error_handler(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("An unexpected error occurred. Please try again.")
     except Exception:
         pass
-    context.user_data.clear()
+    if context.user_data:
+        context.user_data.clear()
 
 def main() -> None:
     application = Application.builder().token(TOKEN).build()
+    
+    # Clear any existing webhook to ensure polling works
+    async def clear_webhook():
+        await application.bot.set_webhook(url=None)  # Drop any webhook
+        logger.info("Webhook cleared to ensure clean polling start")
+    
+    asyncio.run(clear_webhook())  # Run synchronously at startup
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -243,11 +251,10 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_error_handler(error_handler)
     
-    # Ensure clean shutdown on application stop
     async def shutdown():
-        if 'process' in application.bot_data and application.bot_data['process'].returncode is None:
-            application.bot_data['process'].terminate()
-            await application.bot_data['process'].wait()
+        if application.user_data.get('process') and application.user_data['process'].returncode is None:
+            application.user_data['process'].terminate()
+            await application.user_data['process'].wait()
             logger.info("Shutdown: Process terminated")
         for file in ["temp.c", "temp", "output.pdf"]:
             if os.path.exists(file):
@@ -257,7 +264,6 @@ def main() -> None:
                 except OSError as e:
                     logger.error(f"Shutdown: Failed to remove {file}: {str(e)}")
     
-    application.add_handler(CommandHandler("stop", lambda update, context: application.stop_running()))
     application.post_shutdown = shutdown
     
     application.run_polling()
