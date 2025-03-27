@@ -1,11 +1,18 @@
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    CallbackContext,
+    ConversationHandler
+)
 import pdfkit
 import subprocess
 import os
 
 # Telegram Bot Token
-TOKEN = '7667215138:AAHFriagQ3gvuMwbeV0NPedehtw7Ag859Dw'
+TOKEN = os.getenv('TOKEN')
 
 # States for ConversationHandler
 CODE, INPUT = range(2)
@@ -96,23 +103,23 @@ def cancel(update: Update, context: CallbackContext) -> int:
 
 def main() -> None:
     """Start the bot."""
-    updater = Updater(TOKEN)
+    # Use Application instead of Updater for v20+
+    application = Application.builder().token(TOKEN).build()
     
     # Set up the ConversationHandler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            CODE: [MessageHandler(Filters.text & ~Filters.command, handle_code)],
-            INPUT: [MessageHandler(Filters.text & ~Filters.command, handle_input)],
+            CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_code)],
+            INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     
-    dp = updater.dispatcher
-    dp.add_handler(conv_handler)
+    application.add_handler(conv_handler)
 
-    updater.start_polling()
-    updater.idle()
+    # Start polling
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
