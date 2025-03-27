@@ -46,12 +46,12 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         # Normalize code: handle single-line or collapsed multi-line input
         formatted_code = code
         if '\n' not in code:  # Single-line input
-            # Split #include directives and major C syntax elements
-            formatted_code = re.sub(r'(#include\s*<\w+\.h>)', r'\1\n', code)  # #include on its own line
-            formatted_code = re.sub(r'(\bint\s+main\(\)\s*\{)', r'\n\1', formatted_code)  # main() on new line
+            # More aggressive formatting to ensure #include and main are separated
+            formatted_code = re.sub(r'(#include\s*<\w+\.h>)\s*', r'\1\n', code)  # #include on its own line
+            formatted_code = re.sub(r'(int\s+main\(\)\s*\{)', r'\n\1', formatted_code)  # main() on new line
             formatted_code = re.sub(r'(\{|\})', r'\1\n', formatted_code)  # Braces on new lines
             formatted_code = re.sub(r'(;\s*)', r';\n', formatted_code)  # Semicolons followed by newlines
-            # Clean up extra newlines and whitespace
+            # Remove extra spaces and ensure single newlines
             formatted_code = '\n'.join(line.strip() for line in formatted_code.splitlines() if line.strip())
         
         logger.info("Formatted code:\n%s", formatted_code)
@@ -70,12 +70,17 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         logger.info(f"Compilation stderr: {compile_result.stderr}")
         
         if compile_result.returncode == 0:
+            logger.info("Compilation succeeded, prompting for input")
             await update.message.reply_text(
                 "Code compiled successfully! Does your program need input? If yes, send it now. If no, type 'none'."
             )
             return INPUT
         else:
-            await update.message.reply_text(f"Compilation Error:\n{compile_result.stderr}")
+            error_msg = f"Compilation Error:\nSTDERR:\n{compile_result.stderr}"
+            if compile_result.stdout:
+                error_msg += f"\nSTDOUT:\n{compile_result.stdout}"
+            logger.info("Compilation failed, sending error message")
+            await update.message.reply_text(error_msg)
             return ConversationHandler.END
 
     except Exception as e:
@@ -91,16 +96,19 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         logger.info(f"Received input: {user_input}")
         
         if user_input.lower() == 'none':
-            run_result = subprocess.run(["./temp"], capture_output=True, text=True)
+            run_result = subprocess.run(["./temp"], capture_output=True, text=True, timeout=5)
         else:
-            run_result = subprocess.run(["./temp"], input=user_input, capture_output=True, text=True)
+            run_result = subprocess.run(["./temp"], input=user_input, capture_output=True, text=True, timeout=5)
         
         logger.info(f"Program stdout: {run_result.stdout}")
         logger.info(f"Program stderr: {run_result.stderr}")
         logger.info(f"Program return code: {run_result.returncode}")
         
-        if run_result.returncode != 0 and run_result.stderr:
-            await update.message.reply_text(f"Runtime Error:\n{run_result.stderr}")
+        if run_result.returncode != 0:
+            error_msg = f"Runtime Error:\nSTDERR:\n{run_result.stderr}"
+            if run_result.stdout:
+                error_msg += f"\nSTDOUT:\n{run_result.stdout}"
+            await update.message.reply_text(error_msg)
             return ConversationHandler.END
         
         html_content = f"""
@@ -132,6 +140,9 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         
         await update.message.reply_text("Here’s your PDF with the code and output!")
 
+    except subprocess.TimeoutExpired as e:
+        logger.error(f"Program timed out: {str(e)}")
+        await update.message.reply_text("Execution timed out (took longer than 5 seconds).")
     except subprocess.SubprocessError as e:
         logger.error(f"Subprocess error: {str(e)}")
         await update.message.reply_text(f"Execution failed: {str(e)}")
