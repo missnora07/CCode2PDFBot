@@ -72,9 +72,8 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting program execution")
-            # Use -u flag to force unbuffered output
             process = await asyncio.create_subprocess_exec(
-                "./temp", "-u",
+                "./temp",
                 stdin=PIPE,
                 stdout=PIPE,
                 stderr=PIPE,
@@ -147,11 +146,11 @@ async def read_process_output(update: Update, context: CallbackContext):
                     pass
             
             if not done:
-                await process.wait(timeout=1.0)  # Brief wait to check status
-                if process.returncode is not None:
+                logger.info("No output within 10 seconds, checking process status")
+                if process.returncode is not None:  # Check without timeout
                     logger.info("Process ended unexpectedly")
                     break
-                logger.info("No output yet, assuming process is waiting for input")
+                logger.info("Process still alive, assuming it’s waiting for input")
                 context.user_data['waiting_for_input'] = True
                 return
         
@@ -243,7 +242,7 @@ async def cleanup(context: CallbackContext):
     if process and process.returncode is None:
         process.terminate()
         try:
-            await process.wait()
+            await process.wait()  # No timeout here
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
