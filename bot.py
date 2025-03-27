@@ -83,12 +83,12 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         html_content = f"""
         <html>
         <body>
-            <h1>Source Code</h1>
+            <u><b>Program</b></u>
             <pre><code>{code}</code></pre>
+            <u><b>Output</b></u>
+            <pre>{run_result.stdout}</pre>
             <h1>Compilation Output</h1>
             <pre>Success</pre>
-            <h1>Program Output</h1>
-            <pre>{run_result.stdout}</pre>
             <h1>Errors (if any)</h1>
             <pre>{run_result.stderr}</pre>
         </body>
