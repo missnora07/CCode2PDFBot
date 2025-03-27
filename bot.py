@@ -41,9 +41,25 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
     context.user_data['code'] = code
     
     try:
-        # Write C code to a file
+        # Preprocess the code to ensure proper formatting
+        # Split by semicolons and add newlines, but preserve #include
+        formatted_code = ""
+        if code.startswith("#include"):
+            # Extract the include directive
+            include_end = code.find(">") + 1
+            formatted_code += code[:include_end] + "\n"
+            remaining_code = code[include_end:].strip()
+            # Split remaining code by semicolons and format
+            lines = [line.strip() + ";\n" for line in remaining_code.split(";") if line.strip()]
+            formatted_code += "".join(lines)
+        else:
+            # If no #include, just split by semicolons
+            lines = [line.strip() + ";\n" for line in code.split(";") if line.strip()]
+            formatted_code = "".join(lines)
+        
+        # Write formatted C code to a file
         with open("temp.c", "w") as file:
-            file.write(code)
+            file.write(formatted_code)
         
         # Compile C code
         compile_result = subprocess.run(["gcc", "temp.c", "-o", "temp"], capture_output=True, text=True)
@@ -68,37 +84,31 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
     
     try:
         if user_input.lower() == 'none':
-            # Run without input
             run_result = subprocess.run(["./temp"], capture_output=True, text=True)
         else:
-            # Run with input
             run_result = subprocess.run(["./temp"], input=user_input, capture_output=True, text=True)
         
-        # Check for runtime errors
         if run_result.returncode != 0 and run_result.stderr:
             await update.message.reply_text(f"Runtime Error:\n{run_result.stderr}")
             return ConversationHandler.END
         
-        # Prepare HTML content
         html_content = f"""
         <html>
         <body>
-            <u><b>Program</b></u>
+            <h1>Source Code</h1>
             <pre><code>{code}</code></pre>
-            <u><b>Output</b></u>
-            <pre>{run_result.stdout}</pre>
             <h1>Compilation Output</h1>
             <pre>Success</pre>
+            <h1>Program Output</h1>
+            <pre>{run_result.stdout}</pre>
             <h1>Errors (if any)</h1>
             <pre>{run_result.stderr}</pre>
         </body>
         </html>
         """
         
-        # Convert HTML to PDF
         pdfkit.from_string(html_content, 'output.pdf')
         
-        # Send PDF
         with open('output.pdf', 'rb') as pdf_file:
             await context.bot.send_document(chat_id=update.effective_chat.id, document=pdf_file)
         
@@ -112,7 +122,6 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(f"An error occurred during execution: {str(e)}")
     
     finally:
-        # Clean up
         for file in ["temp.c", "temp", "output.pdf"]:
             if os.path.exists(file):
                 try:
@@ -124,7 +133,6 @@ async def handle_input(update: Update, context: CallbackContext) -> int:
 
 async def cancel(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text("Operation cancelled.")
-    # Clean up any leftover files
     for file in ["temp.c", "temp", "output.pdf"]:
         if os.path.exists(file):
             try:
@@ -134,18 +142,15 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 async def error_handler(update: Update, context: CallbackContext) -> None:
-    """Log unhandled errors and notify the user."""
     logger.error("Exception occurred:", exc_info=context.error)
     try:
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
     except Exception:
-        pass  # If we can't reply, just log it
+        pass
 
 def main() -> None:
-    """Start the bot."""
     application = Application.builder().token(TOKEN).build()
     
-    # Set up the ConversationHandler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -158,7 +163,6 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_error_handler(error_handler)
 
-    # Start polling
     application.run_polling()
 
 if __name__ == '__main__':
