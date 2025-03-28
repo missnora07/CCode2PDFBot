@@ -43,7 +43,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
     code = update.message.text
     context.user_data['code'] = code
     context.user_data['output'] = []
-    context.user_data['inputs'] = []  # New list to store user inputs
+    context.user_data['inputs'] = []
     context.user_data['errors'] = []
     context.user_data['waiting_for_input'] = False
     
@@ -74,7 +74,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting program execution")
             process = await asyncio.create_subprocess_exec(
-                "stdbuf", "-o0", "./temp",  # Force unbuffered output
+                "stdbuf", "-o0", "./temp",
                 stdin=PIPE,
                 stdout=PIPE,
                 stderr=PIPE,
@@ -120,8 +120,8 @@ async def read_process_output(update: Update, context: CallbackContext):
             )
             
             if stdout_task in done:
-                stdout_line = (await stdout_task).decode().strip()
-                logger.info(f"Read stdout: '{stdout_line}'")
+                stdout_line = (await stdout_task).decode().rstrip()  # Use rstrip to preserve newlines in log but clean display
+                logger.info(f"Raw stdout: '{stdout_line}'")
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
@@ -133,8 +133,8 @@ async def read_process_output(update: Update, context: CallbackContext):
                         return
             
             if stderr_task in done:
-                stderr_line = (await stderr_task).decode().strip()
-                logger.info(f"Read stderr: '{stderr_line}'")
+                stderr_line = (await stderr_task).decode().rstrip()
+                logger.info(f"Raw stderr: '{stderr_line}'")
                 if stderr_line:
                     errors.append(stderr_line)
                     await update.message.reply_text(f"Error: {stderr_line}")
@@ -165,8 +165,8 @@ async def read_process_output(update: Update, context: CallbackContext):
             await update.message.reply_text(f"Execution error: {str(e)}")
             break
     
-    remaining_stdout = (await process.stdout.read()).decode().strip()
-    remaining_stderr = (await process.stderr.read()).decode().strip()
+    remaining_stdout = (await process.stdout.read()).decode().rstrip()
+    remaining_stderr = (await process.stderr.read()).decode().rstrip()
     logger.info(f"Remaining stdout: '{remaining_stdout}'")
     logger.info(f"Remaining stderr: '{remaining_stderr}'")
     if remaining_stdout:
@@ -194,8 +194,8 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
         process.stdin.write((user_input + "\n").encode())
         await process.stdin.drain()
         logger.info(f"Sent input to process: {user_input}")
-        context.user_data['inputs'].append(user_input)  # Store the input
-        await update.message.reply_text(f"Input: {user_input}")  # Echo input for clarity
+        context.user_data['inputs'].append(user_input)
+        await update.message.reply_text(f"Input: {user_input}")
         context.user_data['waiting_for_input'] = False
         asyncio.create_task(read_process_output(update, context))
     except Exception as e:
@@ -211,15 +211,14 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         inputs = context.user_data['inputs']
         errors = context.user_data['errors']
         
-        # Merge output and inputs in sequence
+        # Merge output and inputs more robustly
         full_output = []
         input_idx = 0
         for line in output:
             full_output.append(line)
-            if line.endswith(": ") or "enter" in line.lower():
-                if input_idx < len(inputs):
-                    full_output.append(inputs[input_idx])
-                    input_idx += 1
+            if (line.endswith(": ") or "enter" in line.lower()) and input_idx < len(inputs):
+                full_output.append(inputs[input_idx])
+                input_idx += 1
         
         full_output_str = "\n".join(full_output)
         errors_str = "\n".join(errors)
