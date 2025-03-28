@@ -73,11 +73,11 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting program execution")
             process = await asyncio.create_subprocess_exec(
-                "./temp",
+                "stdbuf", "-o0", "./temp",  # Force unbuffered output
                 stdin=PIPE,
                 stdout=PIPE,
                 stderr=PIPE,
-                env={"PYTHONUNBUFFERED": "1", "LD_PRELOAD": ""}  # Clear any preload that might affect buffering
+                env={"PYTHONUNBUFFERED": "1"}
             )
             
             context.user_data['process'] = process
@@ -114,7 +114,7 @@ async def read_process_output(update: Update, context: CallbackContext):
             stderr_task = asyncio.create_task(process.stderr.readline())
             done, pending = await asyncio.wait(
                 [stdout_task, stderr_task],
-                timeout=10.0,
+                timeout=15.0,  # Increased timeout for slower responses
                 return_when=asyncio.FIRST_COMPLETED
             )
             
@@ -124,7 +124,6 @@ async def read_process_output(update: Update, context: CallbackContext):
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
-                    # Pause for input if it’s a prompt or partial output
                     if stdout_line and (stdout_line.endswith(": ") or "enter" in stdout_line.lower() or not stdout_line.endswith('\n')):
                         context.user_data['waiting_for_input'] = True
                         logger.info("Detected input prompt or partial output, pausing for user input")
@@ -147,7 +146,7 @@ async def read_process_output(update: Update, context: CallbackContext):
                     pass
             
             if not done:
-                logger.info("No output within 10 seconds, checking process status")
+                logger.info("No output within 15 seconds, checking process status")
                 if process.returncode is not None:
                     logger.info("Process ended unexpectedly")
                     break
@@ -161,7 +160,7 @@ async def read_process_output(update: Update, context: CallbackContext):
             await update.message.reply_text(f"Execution error: {str(e)}")
             break
     
-    # Process has ended
+    # Process has ended or timed out
     remaining_stdout = (await process.stdout.read()).decode().strip()
     remaining_stderr = (await process.stderr.read()).decode().strip()
     logger.info(f"Remaining stdout: '{remaining_stdout}'")
@@ -205,15 +204,19 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         output = "\n".join(context.user_data['output'])
         errors = "\n".join(context.user_data['errors'])
         
+        logger.info(f"Preparing PDF - Code: {code}")
+        logger.info(f"Preparing PDF - Output: {output}")
+        logger.info(f"Preparing PDF - Errors: {errors}")
+        
         html_content = f"""
         <html>
         <body>
             <h1>Source Code</h1>
             <pre><code>{code}</code></pre>
             <h1>Program Output</h1>
-            <pre>{output}</pre>
+            <pre>{output if output else "No output captured"}</pre>
             <h1>Errors (if any)</h1>
-            <pre>{errors}</pre>
+            <pre>{errors if errors else "No errors"}</pre>
         </body>
         </html>
         """
@@ -223,6 +226,7 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         logger.info("PDF generated successfully")
         
         if not os.path.exists('output.pdf'):
+            logger.error("PDF file was not created")
             raise FileNotFoundError("PDF file was not created")
         
         with open('output.pdf', 'rb') as pdf_file:
