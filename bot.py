@@ -77,7 +77,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
                 stdin=PIPE,
                 stdout=PIPE,
                 stderr=PIPE,
-                env={"PYTHONUNBUFFERED": "1"}
+                env={"PYTHONUNBUFFERED": "1", "LD_PRELOAD": ""}  # Clear any preload that might affect buffering
             )
             
             context.user_data['process'] = process
@@ -124,9 +124,10 @@ async def read_process_output(update: Update, context: CallbackContext):
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
-                    if stdout_line and (stdout_line.endswith(": ") or "enter" in stdout_line.lower()):
+                    # Pause for input if it’s a prompt or partial output
+                    if stdout_line and (stdout_line.endswith(": ") or "enter" in stdout_line.lower() or not stdout_line.endswith('\n')):
                         context.user_data['waiting_for_input'] = True
-                        logger.info("Detected input prompt, pausing for user input")
+                        logger.info("Detected input prompt or partial output, pausing for user input")
                         for task in pending:
                             task.cancel()
                         return
@@ -147,11 +148,12 @@ async def read_process_output(update: Update, context: CallbackContext):
             
             if not done:
                 logger.info("No output within 10 seconds, checking process status")
-                if process.returncode is not None:  # Check without timeout
+                if process.returncode is not None:
                     logger.info("Process ended unexpectedly")
                     break
                 logger.info("Process still alive, assuming it’s waiting for input")
                 context.user_data['waiting_for_input'] = True
+                await update.message.reply_text("Program is waiting for input. Please provide it.")
                 return
         
         except Exception as e:
@@ -242,7 +244,7 @@ async def cleanup(context: CallbackContext):
     if process and process.returncode is None:
         process.terminate()
         try:
-            await process.wait()  # No timeout here
+            await process.wait()
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
