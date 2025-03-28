@@ -62,7 +62,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         with open("temp.c", "w") as file:
             file.write(formatted_code)
         
-        logger.info("Wrote code to temp.c")
+        logger.info("Wrote M code to temp.c")
         
         compile_result = subprocess.run(["gcc", "temp.c", "-o", "temp"], capture_output=True, text=True)
         
@@ -108,13 +108,13 @@ async def read_process_output(update: Update, context: CallbackContext):
     errors = context.user_data['errors']
     
     logger.info("Starting to read process output")
-    while process.returncode is None:
+    while True:  # Loop until explicitly broken
         try:
             stdout_task = asyncio.create_task(process.stdout.readline())
             stderr_task = asyncio.create_task(process.stderr.readline())
             done, pending = await asyncio.wait(
                 [stdout_task, stderr_task],
-                timeout=15.0,  # Increased timeout for slower responses
+                timeout=15.0,
                 return_when=asyncio.FIRST_COMPLETED
             )
             
@@ -124,9 +124,10 @@ async def read_process_output(update: Update, context: CallbackContext):
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
-                    if stdout_line and (stdout_line.endswith(": ") or "enter" in stdout_line.lower() or not stdout_line.endswith('\n')):
+                    # Check if process is still alive before pausing for input
+                    if process.returncode is None and (stdout_line.endswith(": ") or "enter" in stdout_line.lower()):
                         context.user_data['waiting_for_input'] = True
-                        logger.info("Detected input prompt or partial output, pausing for user input")
+                        logger.info("Detected input prompt, pausing for user input")
                         for task in pending:
                             task.cancel()
                         return
@@ -145,6 +146,11 @@ async def read_process_output(update: Update, context: CallbackContext):
                 except asyncio.CancelledError:
                     pass
             
+            # Check process status after each read
+            if process.returncode is not None:
+                logger.info("Process has ended")
+                break
+            
             if not done:
                 logger.info("No output within 15 seconds, checking process status")
                 if process.returncode is not None:
@@ -160,7 +166,7 @@ async def read_process_output(update: Update, context: CallbackContext):
             await update.message.reply_text(f"Execution error: {str(e)}")
             break
     
-    # Process has ended or timed out
+    # Process has ended
     remaining_stdout = (await process.stdout.read()).decode().strip()
     remaining_stderr = (await process.stderr.read()).decode().strip()
     logger.info(f"Remaining stdout: '{remaining_stdout}'")
