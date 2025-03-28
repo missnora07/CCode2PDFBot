@@ -43,6 +43,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
     code = update.message.text
     context.user_data['code'] = code
     context.user_data['output'] = []
+    context.user_data['inputs'] = []  # New list to store user inputs
     context.user_data['errors'] = []
     context.user_data['waiting_for_input'] = False
     
@@ -62,7 +63,7 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         with open("temp.c", "w") as file:
             file.write(formatted_code)
         
-        logger.info("Wrote M code to temp.c")
+        logger.info("Wrote code to temp.c")
         
         compile_result = subprocess.run(["gcc", "temp.c", "-o", "temp"], capture_output=True, text=True)
         
@@ -108,7 +109,7 @@ async def read_process_output(update: Update, context: CallbackContext):
     errors = context.user_data['errors']
     
     logger.info("Starting to read process output")
-    while True:  # Loop until explicitly broken
+    while True:
         try:
             stdout_task = asyncio.create_task(process.stdout.readline())
             stderr_task = asyncio.create_task(process.stderr.readline())
@@ -124,7 +125,6 @@ async def read_process_output(update: Update, context: CallbackContext):
                 if stdout_line:
                     output.append(stdout_line)
                     await update.message.reply_text(stdout_line)
-                    # Check if process is still alive before pausing for input
                     if process.returncode is None and (stdout_line.endswith(": ") or "enter" in stdout_line.lower()):
                         context.user_data['waiting_for_input'] = True
                         logger.info("Detected input prompt, pausing for user input")
@@ -146,7 +146,6 @@ async def read_process_output(update: Update, context: CallbackContext):
                 except asyncio.CancelledError:
                     pass
             
-            # Check process status after each read
             if process.returncode is not None:
                 logger.info("Process has ended")
                 break
@@ -166,7 +165,6 @@ async def read_process_output(update: Update, context: CallbackContext):
             await update.message.reply_text(f"Execution error: {str(e)}")
             break
     
-    # Process has ended
     remaining_stdout = (await process.stdout.read()).decode().strip()
     remaining_stderr = (await process.stderr.read()).decode().strip()
     logger.info(f"Remaining stdout: '{remaining_stdout}'")
@@ -196,6 +194,8 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
         process.stdin.write((user_input + "\n").encode())
         await process.stdin.drain()
         logger.info(f"Sent input to process: {user_input}")
+        context.user_data['inputs'].append(user_input)  # Store the input
+        await update.message.reply_text(f"Input: {user_input}")  # Echo input for clarity
         context.user_data['waiting_for_input'] = False
         asyncio.create_task(read_process_output(update, context))
     except Exception as e:
@@ -207,12 +207,26 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
 async def generate_and_send_pdf(update: Update, context: CallbackContext):
     try:
         code = context.user_data['code']
-        output = "\n".join(context.user_data['output'])
-        errors = "\n".join(context.user_data['errors'])
+        output = context.user_data['output']
+        inputs = context.user_data['inputs']
+        errors = context.user_data['errors']
+        
+        # Merge output and inputs in sequence
+        full_output = []
+        input_idx = 0
+        for line in output:
+            full_output.append(line)
+            if line.endswith(": ") or "enter" in line.lower():
+                if input_idx < len(inputs):
+                    full_output.append(inputs[input_idx])
+                    input_idx += 1
+        
+        full_output_str = "\n".join(full_output)
+        errors_str = "\n".join(errors)
         
         logger.info(f"Preparing PDF - Code: {code}")
-        logger.info(f"Preparing PDF - Output: {output}")
-        logger.info(f"Preparing PDF - Errors: {errors}")
+        logger.info(f"Preparing PDF - Full Output: {full_output_str}")
+        logger.info(f"Preparing PDF - Errors: {errors_str}")
         
         html_content = f"""
         <html>
@@ -220,9 +234,9 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
             <h1>Source Code</h1>
             <pre><code>{code}</code></pre>
             <h1>Program Output</h1>
-            <pre>{output if output else "No output captured"}</pre>
+            <pre>{full_output_str if full_output_str else "No output captured"}</pre>
             <h1>Errors (if any)</h1>
-            <pre>{errors if errors else "No errors"}</pre>
+            <pre>{errors_str if errors_str else "No errors"}</pre>
         </body>
         </html>
         """
