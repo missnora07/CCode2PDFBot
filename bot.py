@@ -67,10 +67,6 @@ async def handle_code(update: Update, context: CallbackContext) -> int:
         
         compile_result = subprocess.run(["gcc", "temp.c", "-o", "temp"], capture_output=True, text=True)
         
-        logger.info(f"Compilation result - return code: {compile_result.returncode}")
-        logger.info(f"Compilation stdout: {compile_result.stdout}")
-        logger.info(f"Compilation stderr: {compile_result.stderr}")
-        
         if compile_result.returncode == 0:
             logger.info("Compilation succeeded, starting program execution")
             process = await asyncio.create_subprocess_exec(
@@ -109,66 +105,35 @@ async def read_process_output(update: Update, context: CallbackContext):
     errors = context.user_data['errors']
     
     logger.info("Starting to read process output")
-    while True:
+    while process.returncode is None:
         try:
-            stdout_task = asyncio.create_task(process.stdout.readline())
-            stderr_task = asyncio.create_task(process.stderr.readline())
-            done, pending = await asyncio.wait(
-                [stdout_task, stderr_task],
-                timeout=15.0,
-                return_when=asyncio.FIRST_COMPLETED
-            )
+            stdout_line = await asyncio.wait_for(process.stdout.readline(), timeout=15.0)
+            stdout_line = stdout_line.decode().rstrip()
+            logger.info(f"Raw stdout: '{stdout_line}'")
+            if stdout_line:
+                output.append(stdout_line)
+                await update.message.reply_text(stdout_line)
+                if stdout_line.endswith(": ") or "enter" in stdout_line.lower():
+                    context.user_data['waiting_for_input'] = True
+                    logger.info("Detected input prompt, pausing for user input")
+                    return
             
-            if stdout_task in done:
-                stdout_line = (await stdout_task).decode().rstrip()
-                logger.info(f"Raw stdout: '{stdout_line}'")
-                if stdout_line:
-                    output.append(stdout_line)
-                    await update.message.reply_text(stdout_line)
-                    if process.returncode is None and (stdout_line.endswith(": ") or "enter" in stdout_line.lower()):
-                        context.user_data['waiting_for_input'] = True
-                        logger.info("Detected input prompt, pausing for user input")
-                        for task in pending:
-                            task.cancel()
-                        return
-            
-            if stderr_task in done:
-                stderr_line = (await stderr_task).decode().rstrip()
-                logger.info(f"Raw stderr: '{stderr_line}'")
-                if stderr_line:
-                    errors.append(stderr_line)
-                    await update.message.reply_text(f"Error: {stderr_line}")
-            
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            
-            if process.returncode is not None:
-                logger.info("Process has ended")
-                break
-            
-            if not done:
-                logger.info("No output within 15 seconds, checking process status")
-                if process.returncode is not None:
-                    logger.info("Process ended unexpectedly")
-                    break
-                logger.info("Process still alive, assuming it’s waiting for input")
+            stderr_line = await process.stderr.readline()
+            stderr_line = stderr_line.decode().rstrip()
+            if stderr_line:
+                errors.append(stderr_line)
+                await update.message.reply_text(f"Error: {stderr_line}")
+        
+        except asyncio.TimeoutError:
+            logger.info("Timeout waiting for output, assuming input required")
+            if process.returncode is None:
                 context.user_data['waiting_for_input'] = True
                 await update.message.reply_text("Program is waiting for input. Please provide it.")
                 return
-        
-        except Exception as e:
-            logger.error(f"Error in read_process_output: {str(e)}")
-            await update.message.reply_text(f"Execution error: {str(e)}")
-            break
     
+    # Capture any remaining output
     remaining_stdout = (await process.stdout.read()).decode().rstrip()
     remaining_stderr = (await process.stderr.read()).decode().rstrip()
-    logger.info(f"Remaining stdout: '{remaining_stdout}'")
-    logger.info(f"Remaining stderr: '{remaining_stderr}'")
     if remaining_stdout:
         output.append(remaining_stdout)
         await update.message.reply_text(remaining_stdout)
@@ -176,6 +141,7 @@ async def read_process_output(update: Update, context: CallbackContext):
         errors.append(remaining_stderr)
         await update.message.reply_text(f"Error: {remaining_stderr}")
     
+    logger.info("Process completed, generating PDF")
     await generate_and_send_pdf(update, context)
 
 async def handle_running(update: Update, context: CallbackContext) -> int:
@@ -195,7 +161,6 @@ async def handle_running(update: Update, context: CallbackContext) -> int:
         await process.stdin.drain()
         logger.info(f"Sent input to process: {user_input}")
         context.user_data['inputs'].append(user_input)
-        await update.message.reply_text(f"Input: {user_input}")
         context.user_data['waiting_for_input'] = False
         asyncio.create_task(read_process_output(update, context))
     except Exception as e:
@@ -211,15 +176,15 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         inputs = context.user_data['inputs']
         errors = context.user_data['errors']
         
-        # Merge output and inputs with better formatting
+        # Merge output and inputs correctly
         full_output = []
         input_idx = 0
         for line in output:
-            full_output.append(line)
-            # If this line is a prompt, append the next input on the same line
             if (line.endswith(": ") or "enter" in line.lower()) and input_idx < len(inputs):
-                full_output[-1] = f"{line}{inputs[input_idx]}"
+                full_output.append(f"{line}{inputs[input_idx]}")
                 input_idx += 1
+            else:
+                full_output.append(line)
         
         full_output_str = "\n".join(full_output)
         errors_str = "\n".join(errors)
@@ -241,21 +206,11 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         </html>
         """
         
-        logger.info("Generating PDF...")
         pdfkit.from_string(html_content, 'output.pdf')
-        logger.info("PDF generated successfully")
-        
-        if not os.path.exists('output.pdf'):
-            logger.error("PDF file was not created")
-            raise FileNotFoundError("PDF file was not created")
-        
         with open('output.pdf', 'rb') as pdf_file:
-            logger.info("Sending PDF to user...")
             await context.bot.send_document(chat_id=update.effective_chat.id, document=pdf_file)
-            logger.info("PDF sent successfully")
-        
         await update.message.reply_text("Program execution completed! Here's your PDF with the results.")
-
+    
     except Exception as e:
         logger.error(f"Error in generate_and_send_pdf: {str(e)}")
         await update.message.reply_text(f"Failed to generate PDF: {str(e)}")
