@@ -120,7 +120,7 @@ async def read_process_output(update: Update, context: CallbackContext):
             )
             
             if stdout_task in done:
-                stdout_line = (await stdout_task).decode().rstrip()  # Use rstrip to preserve newlines in log but clean display
+                stdout_line = (await stdout_task).decode().rstrip()
                 logger.info(f"Raw stdout: '{stdout_line}'")
                 if stdout_line:
                     output.append(stdout_line)
@@ -211,13 +211,14 @@ async def generate_and_send_pdf(update: Update, context: CallbackContext):
         inputs = context.user_data['inputs']
         errors = context.user_data['errors']
         
-        # Merge output and inputs more robustly
+        # Merge output and inputs with better formatting
         full_output = []
         input_idx = 0
         for line in output:
             full_output.append(line)
+            # If this line is a prompt, append the next input on the same line
             if (line.endswith(": ") or "enter" in line.lower()) and input_idx < len(inputs):
-                full_output.append(inputs[input_idx])
+                full_output[-1] = f"{line}{inputs[input_idx]}"
                 input_idx += 1
         
         full_output_str = "\n".join(full_output)
